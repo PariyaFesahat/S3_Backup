@@ -1,0 +1,17 @@
+backup:
+  source_dir: /dump
+  file_pattern: "*.dump"
+
+s3:
+  endpoint_url: http://localhost:9000
+  access_key: "your-minio-access-key"
+  secret_key: "your-minio-secret-key"
+  bucket: "my-postgres-backups"
+  prefix: "postgres/"
+  region: "us-east-1"
+
+retention:
+  days: 10
+
+logging:
+  level: INFO
