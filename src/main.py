@@ -24,14 +24,21 @@ def main():
     print(f"Checking S3 bucket: {s3.bucket}")
     s3.check_bucket()
 
-    print("S3 bucket is accessible.")
-
     for backup_file in backup_files:
         print(f"Uploading: {backup_file}")
 
         object_name = s3.upload_file(backup_file)
 
         print(f"Uploaded: {object_name}")
+
+    print(
+        f"Cleaning up backups older than "
+        f"{config['retention']['days']} days..."
+    )
+
+    s3.cleanup_old_backups()
+
+    print("Backup process completed.")
 
 
 if __name__ == "__main__":

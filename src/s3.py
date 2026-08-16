@@ -1,5 +1,5 @@
 import socket
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import boto3
 from botocore.exceptions import ClientError
@@ -12,7 +12,7 @@ class S3Client:
         self.bucket = s3_config["bucket"]
         self.prefix = s3_config.get("prefix", "").strip("/")
 
-        # Automatically get the server hostname
+        self.retention_days = config["retention"]["days"]
         self.server_name = socket.gethostname()
 
         self.client = boto3.client(
@@ -24,7 +24,6 @@ class S3Client:
         )
 
     def check_bucket(self) -> None:
-        """Check that the configured S3 bucket exists and is accessible."""
         try:
             self.client.head_bucket(Bucket=self.bucket)
         except ClientError as exc:
@@ -38,8 +37,6 @@ class S3Client:
 
         backup_date = datetime.now().strftime("%Y-%m-%d")
 
-        # Example:
-        # postgres/db-server-01/2026-08-16/test.dump
         object_name = (
             f"{self.prefix}/"
             f"{self.server_name}/"
@@ -54,3 +51,47 @@ class S3Client:
         )
 
         return object_name
+
+    def cleanup_old_backups(self) -> None:
+        cutoff_date = (
+            datetime.now() - timedelta(days=self.retention_days)
+        ).date()
+
+        server_prefix = (
+            f"{self.prefix}/"
+            f"{self.server_name}/"
+        )
+
+        paginator = self.client.get_paginator("list_objects_v2")
+
+        for page in paginator.paginate(
+            Bucket=self.bucket,
+            Prefix=server_prefix,
+        ):
+            for obj in page.get("Contents", []):
+                object_key = obj["Key"]
+
+                relative_path = object_key[len(server_prefix):]
+
+                parts = relative_path.split("/")
+
+                if len(parts) < 2:
+                    continue
+
+                date_folder = parts[0]
+
+                try:
+                    backup_date = datetime.strptime(
+                        date_folder,
+                        "%Y-%m-%d",
+                    ).date()
+                except ValueError:
+                    continue
+
+                if backup_date < cutoff_date:
+                    print(f"Deleting old backup: {object_key}")
+
+                    self.client.delete_object(
+                        Bucket=self.bucket,
+                        Key=object_key,
+                    )
