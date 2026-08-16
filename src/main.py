@@ -1,5 +1,6 @@
 from .backup import find_backup_files
 from .config import load_config
+from .s3 import S3Client
 
 
 def main():
@@ -17,6 +18,20 @@ def main():
 
     for backup_file in backup_files:
         print(f"  {backup_file}")
+
+    s3 = S3Client(config)
+
+    print(f"Checking S3 bucket: {s3.bucket}")
+    s3.check_bucket()
+
+    print("S3 bucket is accessible.")
+
+    for backup_file in backup_files:
+        print(f"Uploading: {backup_file}")
+
+        object_name = s3.upload_file(backup_file)
+
+        print(f"Uploaded: {object_name}")
 
 
 if __name__ == "__main__":
