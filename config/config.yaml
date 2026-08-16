@@ -1,11 +1,13 @@
 backup:
   source_dir: /opt/test
   file_pattern: "*.dump"
+  server_name: server01
+
 
 s3:
   endpoint_url: http://localhost:9000
-  access_key: "your-minio-access-key"
-  secret_key: "your-minio-secret-key"
+  access_key: "minioadmin"
+  secret_key: "minioadmin123"
   bucket: "my-postgres-backups"
   prefix: "postgres/"
   region: "us-east-1"

@@ -2,3 +2,4 @@
 __pycache__/
 *.pyc
 config/config.yaml
+src/__pycache__/main.cpython-312.pyc
