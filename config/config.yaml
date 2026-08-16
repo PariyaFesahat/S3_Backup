@@ -1,5 +1,5 @@
 backup:
-  source_dir: /dump
+  source_dir: /opt/test
   file_pattern: "*.dump"
 
 s3:
