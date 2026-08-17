@@ -1,4 +1,4 @@
-from .backup import find_backup_files
+from .backup import find_backup_directories
 from .config import load_config
 from .s3 import S3Client
 
@@ -7,36 +7,28 @@ def main():
     config = load_config()
 
     source_dir = config["backup"]["source_dir"]
-    file_pattern = config["backup"]["file_pattern"]
 
-    backup_files = find_backup_files(
+    backup_directories = find_backup_directories(
         source_dir=source_dir,
-        file_pattern=file_pattern,
     )
 
-    print(f"Found {len(backup_files)} backup file(s):")
+    print(
+        f"Found {len(backup_directories)} backup "
+        f"directory(s):"
+    )
 
-    for backup_file in backup_files:
-        print(f"  {backup_file}")
+    for backup_dir in backup_directories:
+        print(f"  {backup_dir}")
 
     s3 = S3Client(config)
 
     print(f"Checking S3 bucket: {s3.bucket}")
     s3.check_bucket()
 
-    for backup_file in backup_files:
-        print(f"Uploading: {backup_file}")
+    print("S3 bucket is accessible.")
 
-        object_name = s3.upload_file(backup_file)
-
-        print(f"Uploaded: {object_name}")
-
-    print(
-        f"Cleaning up backups older than "
-        f"{config['retention']['days']} days..."
-    )
-
-    s3.cleanup_old_backups()
+    for backup_dir in backup_directories:
+        s3.upload_backup_directory(backup_dir)
 
     print("Backup process completed.")
 

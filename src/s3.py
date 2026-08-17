@@ -1,47 +1,82 @@
-import socket
-from datetime import datetime, timedelta
+def upload_backup_directory(self, backup_dir) -> bool:
+    """
+    Upload a backup directory to S3.
 
-import boto3
-from botocore.exceptions import ClientError
+    S3 structure:
 
+        <prefix>/<server>/<date>/<backup_directory>/
 
-class S3Client:
-    def __init__(self, config: dict):
-        s3_config = config["s3"]
+    The date comes from the directory mtime, which is the
+    timestamp normally shown by `ls -l`.
 
-        self.bucket = s3_config["bucket"]
-        self.prefix = s3_config.get("prefix", "").strip("/")
+    If the same backup directory already exists in S3,
+    it is skipped and never overwritten.
+    """
 
-        self.retention_days = config["retention"]["days"]
-        self.server_name = socket.gethostname()
+    backup_dir = backup_dir.resolve()
 
-        self.client = boto3.client(
-            "s3",
-            endpoint_url=s3_config["endpoint_url"],
-            aws_access_key_id=s3_config["access_key"],
-            aws_secret_access_key=s3_config["secret_key"],
-            region_name=s3_config.get("region", "us-east-1"),
+    # Get the directory timestamp shown by ls -l
+    directory_mtime = backup_dir.stat().st_mtime
+
+    backup_date = datetime.fromtimestamp(
+        directory_mtime
+    ).strftime("%Y-%m-%d")
+
+    # Example:
+    # postgres/server01/2026-08-17/back090087/
+    backup_prefix = (
+        f"{self.prefix}/"
+        f"{self.server_name}/"
+        f"{backup_date}/"
+        f"{backup_dir.name}/"
+    )
+
+    print(
+        f"Processing: {backup_dir.name} "
+        f"(date: {backup_date})"
+    )
+
+    # Check ONLY this backup directory.
+    response = self.client.list_objects_v2(
+        Bucket=self.bucket,
+        Prefix=backup_prefix,
+        MaxKeys=1,
+    )
+
+    if "Contents" in response:
+        print(
+            f"Skipping: {backup_dir.name} "
+            f"already exists in S3"
         )
+        return False
 
-    def check_bucket(self) -> None:
-        try:
-            self.client.head_bucket(Bucket=self.bucket)
-        except ClientError as exc:
-            raise RuntimeError(
-                f"Cannot access S3 bucket '{self.bucket}': {exc}"
-            ) from exc
+    # Find all files inside the backup directory.
+    files = [
+        path
+        for path in backup_dir.rglob("*")
+        if path.is_file()
+    ]
 
-    def upload_file(self, file_path) -> str:
-        """Upload a backup under server/date directory."""
-        file_path = file_path.resolve()
+    if not files:
+        print(
+            f"WARNING: {backup_dir} contains no files"
+        )
+        return False
 
-        backup_date = datetime.now().strftime("%Y-%m-%d")
+    # Upload all files while preserving their names
+    # and subdirectory structure.
+    for file_path in files:
+        relative_path = file_path.relative_to(backup_dir)
 
         object_name = (
-            f"{self.prefix}/"
-            f"{self.server_name}/"
-            f"{backup_date}/"
-            f"{file_path.name}"
+            f"{backup_prefix}"
+            f"{relative_path.as_posix()}"
+        )
+
+        print(f"Uploading: {file_path}")
+        print(
+            f"       to: "
+            f"s3://{self.bucket}/{object_name}"
         )
 
         self.client.upload_file(
@@ -50,48 +85,9 @@ class S3Client:
             object_name,
         )
 
-        return object_name
+    print(
+        f"Backup uploaded: "
+        f"{backup_dir.name} -> {backup_date}"
+    )
 
-    def cleanup_old_backups(self) -> None:
-        cutoff_date = (
-            datetime.now() - timedelta(days=self.retention_days)
-        ).date()
-
-        server_prefix = (
-            f"{self.prefix}/"
-            f"{self.server_name}/"
-        )
-
-        paginator = self.client.get_paginator("list_objects_v2")
-
-        for page in paginator.paginate(
-            Bucket=self.bucket,
-            Prefix=server_prefix,
-        ):
-            for obj in page.get("Contents", []):
-                object_key = obj["Key"]
-
-                relative_path = object_key[len(server_prefix):]
-
-                parts = relative_path.split("/")
-
-                if len(parts) < 2:
-                    continue
-
-                date_folder = parts[0]
-
-                try:
-                    backup_date = datetime.strptime(
-                        date_folder,
-                        "%Y-%m-%d",
-                    ).date()
-                except ValueError:
-                    continue
-
-                if backup_date < cutoff_date:
-                    print(f"Deleting old backup: {object_key}")
-
-                    self.client.delete_object(
-                        Bucket=self.bucket,
-                        Key=object_key,
-                    )
+    return True
