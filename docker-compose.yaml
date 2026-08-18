@@ -1,0 +1,36 @@
+
+services:
+  s3-backup:
+    build: .
+
+    container_name: s3-backup
+
+    restart: unless-stopped
+
+    volumes:
+      # Local PostgreSQL backups
+      - /opt/test:/opt/test:rw
+
+      # Configuration
+      - ./config/config.yaml:/app/config/config.yaml:ro
+    networks:
+      - backup-net
+
+  minio:
+    image: hub.hamdocker.ir/minio/minio:latest
+    container_name: local-s3
+    restart: unless-stopped
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin123
+    volumes:
+      - ./data:/data
+    command: server /data --console-address ":9001"
+    networks:
+      - backup-net
+
+networks:
+  backup-net:
