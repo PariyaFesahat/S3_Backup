@@ -8,9 +8,57 @@ class BackupManager:
     def __init__(self, s3_client: S3Client):
         self.s3 = s3_client
 
+    @staticmethod
+    def is_ignored_file(file_path: Path) -> bool:
+        """
+        Ignore temporary/editor files.
+
+        Examples:
+            file.txt~
+            .file.txt.swp
+            .file.txt.swo
+            .#file.txt
+            file.swp
+            file.swo
+        """
+
+        name = file_path.name
+
+        # Vim / editor swap files
+        if name.endswith(".swp"):
+            return True
+
+        if name.endswith(".swo"):
+            return True
+
+        if name.endswith(".swn"):
+            return True
+
+        # Backup files created by editors
+        if name.endswith("~"):
+            return True
+
+        # Vim temporary files
+        if name.startswith(".#"):
+            return True
+
+        return False
+
     def sync_directory(self, backup_dir: Path) -> None:
         """
         Synchronize one local backup directory with S3.
+
+        New files:
+            Upload
+
+        Changed files:
+            Replace S3 object
+
+        Deleted local files:
+            Delete from S3
+
+        Temporary/editor files:
+            Ignore
         """
 
         backup_dir = backup_dir.resolve()
@@ -25,7 +73,9 @@ class BackupManager:
         if not backup_dir.is_dir():
             return
 
-        backup_date = get_backup_date(backup_dir)
+        backup_date = get_backup_date(
+            backup_dir
+        )
 
         prefix = self.s3.get_backup_prefix(
             backup_date=backup_date,
@@ -36,67 +86,131 @@ class BackupManager:
         print(
             f"Synchronizing: {backup_dir}"
         )
+
         print(
             f"S3 prefix: {prefix}"
         )
 
-        # Local files
+        # -------------------------------------------------
+        # Find local files
+        # -------------------------------------------------
+
         local_files = {}
 
         for file_path in backup_dir.rglob("*"):
-            if file_path.is_file():
-                relative_path = file_path.relative_to(
-                    backup_dir
+
+            if not file_path.is_file():
+                continue
+
+            if self.is_ignored_file(file_path):
+                print(
+                    f"Ignoring temporary file: "
+                    f"{file_path}"
                 )
+                continue
 
-                local_files[
-                    relative_path.as_posix()
-                ] = file_path
+            relative_path = file_path.relative_to(
+                backup_dir
+            )
 
-        # Existing S3 files
-        s3_files = self.s3.list_files(prefix)
+            local_files[
+                relative_path.as_posix()
+            ] = file_path
 
-        # Upload new/changed files
+        # -------------------------------------------------
+        # Get existing S3 files
+        # -------------------------------------------------
+
+        s3_files = self.s3.list_files(
+            prefix
+        )
+
+        # -------------------------------------------------
+        # Upload new / changed files
+        # -------------------------------------------------
+
         for relative_path, file_path in local_files.items():
 
             object_key = (
-                f"{prefix}{relative_path}"
+                f"{prefix}"
+                f"{relative_path}"
             )
 
-            s3_file = s3_files.get(relative_path)
+            s3_file = s3_files.get(
+                relative_path
+            )
 
+            # ---------------------------------------------
             # New file
+            # ---------------------------------------------
+
             if s3_file is None:
+
                 print(
                     f"Uploading new file: "
                     f"{relative_path}"
                 )
 
-                self.s3.upload_file(
-                    file_path,
-                    object_key,
-                )
+                try:
+                    self.s3.upload_file(
+                        file_path,
+                        object_key,
+                    )
+
+                except FileNotFoundError:
+                    # File may have been created and
+                    # deleted by an editor while we
+                    # were processing the directory.
+                    print(
+                        f"File disappeared before upload, "
+                        f"skipping: {file_path}"
+                    )
 
                 continue
 
-            # Check file size first.
-            local_size = file_path.stat().st_size
+            # ---------------------------------------------
+            # Changed file
+            # ---------------------------------------------
+
+            try:
+                local_size = (
+                    file_path.stat().st_size
+                )
+
+            except FileNotFoundError:
+                print(
+                    f"File disappeared before checking, "
+                    f"skipping: {file_path}"
+                )
+                continue
 
             if local_size != s3_file["size"]:
+
                 print(
                     f"Uploading changed file: "
                     f"{relative_path}"
                 )
 
-                self.s3.upload_file(
-                    file_path,
-                    object_key,
-                )
+                try:
+                    self.s3.upload_file(
+                        file_path,
+                        object_key,
+                    )
 
-        # Delete files that no longer exist locally
+                except FileNotFoundError:
+                    print(
+                        f"File disappeared before upload, "
+                        f"skipping: {file_path}"
+                    )
+
+        # -------------------------------------------------
+        # Delete files removed locally
+        # -------------------------------------------------
+
         for relative_path, s3_file in s3_files.items():
 
             if relative_path not in local_files:
+
                 print(
                     f"Deleting removed file: "
                     f"{relative_path}"

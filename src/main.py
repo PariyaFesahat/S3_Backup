@@ -46,10 +46,13 @@ def main():
 
     # Start continuous watcher.
     watcher = BackupWatcher(
-        source_dir=str(source_dir),
-        manager=manager,
-    )
-
+    source_dir=str(source_dir),
+    manager=manager,
+    debounce_seconds=config["watcher"].get(
+        "debounce_seconds",
+        5,
+    ),
+)
     watcher.start()
 
 

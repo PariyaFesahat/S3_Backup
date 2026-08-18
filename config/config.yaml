@@ -1,8 +1,5 @@
 backup:
   source_dir: /opt/test
-  file_pattern: "*.dump"
-  server_name: server01
-
 
 s3:
   endpoint_url: http://localhost:9000
@@ -17,3 +14,6 @@ retention:
 
 logging:
   level: INFO
+
+watcher:
+  debounce_seconds: 5
