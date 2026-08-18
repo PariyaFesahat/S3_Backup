@@ -1,0 +1,19 @@
+
+services:
+  s3-backup:
+    build: .
+
+    container_name: s3-backup
+
+    restart: unless-stopped
+
+    volumes:
+      # Local PostgreSQL backups
+      - /opt/test:/opt/test:rw
+
+      # Configuration
+      - ./config/config.yaml:/app/config/config.yaml:ro
+
+    environment:
+      - TZ: Asia/Tehran
+

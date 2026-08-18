@@ -1,6 +1,5 @@
 backup:
-  source_dir: /opt/test
-
+  source_dir: - /opt/test
 s3:
   endpoint_url: http://localhost:9000
   access_key: "minioadmin"
