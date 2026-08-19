@@ -13,8 +13,10 @@ logger = logging.getLogger(__name__)
 
 
 def main():
+    # Load configuration
     config = load_config()
 
+    # Configure logging
     logging_config = config.get(
         "logging",
         {},
@@ -27,12 +29,17 @@ def main():
         )
     )
 
-    logger.info("Starting S3 backup watcher")
-
-    source_dir = Path(
-        config["backup"]["source_dir"]
+    logger.info(
+        "Starting S3 backup watcher"
     )
 
+    # Get multiple backup source directories
+    source_dirs = [
+        Path(path).resolve()
+        for path in config["backup"]["source_dirs"]
+    ]
+
+    # Create S3 client
     s3 = S3Client(config)
 
     logger.info(
@@ -46,21 +53,41 @@ def main():
         "S3 bucket is accessible."
     )
 
+    # Create backup manager
     manager = BackupManager(s3)
 
-    backup_directories = find_backup_directories(
-        str(source_dir)
-    )
+    # -------------------------------------------------
+    # Initial synchronization
+    # -------------------------------------------------
 
-    logger.info(
-        "Found %d existing backup directory(s).",
-        len(backup_directories),
-    )
+    for source_dir in source_dirs:
 
-    for backup_dir in backup_directories:
-        manager.sync_directory(
-            backup_dir
+        logger.info(
+            "Checking backup directory: %s",
+            source_dir,
         )
+
+        backup_directories = (
+            find_backup_directories(
+                str(source_dir)
+            )
+        )
+
+        logger.info(
+            "Found %d backup directory(s) under %s",
+            len(backup_directories),
+            source_dir,
+        )
+
+        for backup_dir in backup_directories:
+
+            manager.sync_directory(
+                backup_dir
+            )
+
+    # -------------------------------------------------
+    # Watcher configuration
+    # -------------------------------------------------
 
     watcher_config = config.get(
         "watcher",
@@ -72,8 +99,15 @@ def main():
         5,
     )
 
+    # -------------------------------------------------
+    # Start watcher
+    # -------------------------------------------------
+
     watcher = BackupWatcher(
-        source_dir=str(source_dir),
+        source_dirs=[
+            str(path)
+            for path in source_dirs
+        ],
         manager=manager,
         debounce_seconds=debounce_seconds,
     )
