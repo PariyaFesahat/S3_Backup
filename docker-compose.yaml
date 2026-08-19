@@ -17,8 +17,8 @@ services:
     environment:
       TZ: Asia/Tehran
 
-    mem_limit: 16m
-    mem_reservation: 8m
+    mem_limit: 256m
+    mem_reservation: 128m
 
     cpus: 0.50
     pids_limit: 100
