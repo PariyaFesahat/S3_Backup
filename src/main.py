@@ -1,14 +1,33 @@
+import logging
 from pathlib import Path
 
 from .backup import find_backup_directories
 from .config import load_config
+from .logging_config import setup_logging
 from .manager import BackupManager
 from .s3 import S3Client
 from .watcher import BackupWatcher
 
 
+logger = logging.getLogger(__name__)
+
+
 def main():
     config = load_config()
+
+    logging_config = config.get(
+        "logging",
+        {},
+    )
+
+    setup_logging(
+        logging_config.get(
+            "level",
+            "INFO",
+        )
+    )
+
+    logger.info("Starting S3 backup watcher")
 
     source_dir = Path(
         config["backup"]["source_dir"]
@@ -16,27 +35,26 @@ def main():
 
     s3 = S3Client(config)
 
-    print(
-        f"Checking S3 bucket: {s3.bucket}"
+    logger.info(
+        "Checking S3 bucket: %s",
+        s3.bucket,
     )
 
     s3.check_bucket()
 
-    print(
+    logger.info(
         "S3 bucket is accessible."
     )
 
     manager = BackupManager(s3)
 
-    # Synchronize existing directories once
-    # when the application starts.
     backup_directories = find_backup_directories(
         str(source_dir)
     )
 
-    print(
-        f"Found {len(backup_directories)} "
-        f"existing backup directory(s)."
+    logger.info(
+        "Found %d existing backup directory(s).",
+        len(backup_directories),
     )
 
     for backup_dir in backup_directories:
@@ -44,15 +62,22 @@ def main():
             backup_dir
         )
 
-    # Start continuous watcher.
-    watcher = BackupWatcher(
-    source_dir=str(source_dir),
-    manager=manager,
-    debounce_seconds=config["watcher"].get(
+    watcher_config = config.get(
+        "watcher",
+        {},
+    )
+
+    debounce_seconds = watcher_config.get(
         "debounce_seconds",
         5,
-    ),
-)
+    )
+
+    watcher = BackupWatcher(
+        source_dir=str(source_dir),
+        manager=manager,
+        debounce_seconds=debounce_seconds,
+    )
+
     watcher.start()
 
 

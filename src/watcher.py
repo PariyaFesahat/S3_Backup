@@ -1,8 +1,12 @@
+import logging
 import threading
 from pathlib import Path
 
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
+
+
+logger = logging.getLogger(__name__)
 
 
 class BackupEventHandler(FileSystemEventHandler):
@@ -17,7 +21,6 @@ class BackupEventHandler(FileSystemEventHandler):
         self.debounce_seconds = debounce_seconds
 
         self.timers = {}
-
         self.lock = threading.Lock()
 
     def _get_backup_directory(
@@ -31,14 +34,9 @@ class BackupEventHandler(FileSystemEventHandler):
             relative = path.relative_to(
                 self.source_dir
             )
-
         except ValueError:
             return None
 
-        # We need at least:
-        #
-        # /dump/<backup-directory>/...
-        #
         if len(relative.parts) < 2:
             return None
 
@@ -64,9 +62,7 @@ class BackupEventHandler(FileSystemEventHandler):
 
         with self.lock:
 
-            existing_timer = self.timers.get(
-                key
-            )
+            existing_timer = self.timers.get(key)
 
             if existing_timer is not None:
                 existing_timer.cancel()
@@ -83,6 +79,11 @@ class BackupEventHandler(FileSystemEventHandler):
 
             timer.start()
 
+            logger.debug(
+                "Scheduled synchronization: %s",
+                backup_dir,
+            )
+
     def _run_sync(
         self,
         backup_dir: Path,
@@ -97,14 +98,13 @@ class BackupEventHandler(FileSystemEventHandler):
                 backup_dir
             )
 
-        except Exception as exc:
-            print(
-                f"Error synchronizing "
-                f"{backup_dir}: {exc}"
+        except Exception:
+            logger.exception(
+                "Error synchronizing: %s",
+                backup_dir,
             )
 
         finally:
-
             with self.lock:
                 self.timers.pop(
                     key,
@@ -123,30 +123,31 @@ class BackupEventHandler(FileSystemEventHandler):
         if backup_dir is None:
             return
 
+        logger.debug(
+            "Filesystem event: %s",
+            path,
+        )
+
         self._schedule_sync(
             backup_dir
         )
 
     def on_created(self, event):
-
         self._handle_event(
             event.src_path
         )
 
     def on_modified(self, event):
-
         self._handle_event(
             event.src_path
         )
 
     def on_deleted(self, event):
-
         self._handle_event(
             event.src_path
         )
 
     def on_moved(self, event):
-
         self._handle_event(
             event.src_path
         )
@@ -157,14 +158,12 @@ class BackupEventHandler(FileSystemEventHandler):
 
 
 class BackupWatcher:
-
     def __init__(
         self,
         source_dir: str,
         manager,
         debounce_seconds: int = 5,
     ):
-
         self.source_dir = Path(
             source_dir
         ).resolve()
@@ -178,7 +177,6 @@ class BackupWatcher:
     def start(self) -> None:
 
         if not self.source_dir.exists():
-
             raise FileNotFoundError(
                 f"Watch directory does not exist: "
                 f"{self.source_dir}"
@@ -202,23 +200,22 @@ class BackupWatcher:
 
         observer.start()
 
-        print(
-            f"Watching: {self.source_dir}"
+        logger.info(
+            "Watching: %s",
+            self.source_dir,
         )
 
-        print(
-            f"Debounce: "
-            f"{self.debounce_seconds} seconds"
+        logger.info(
+            "Debounce: %s seconds",
+            self.debounce_seconds,
         )
 
         try:
-
             while True:
                 observer.join(1)
 
         except KeyboardInterrupt:
-
-            print(
+            logger.info(
                 "Stopping watcher..."
             )
 

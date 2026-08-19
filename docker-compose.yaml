@@ -13,6 +13,22 @@ services:
 
       # Configuration
       - ./config/config.yaml:/app/config/config.yaml:ro
+
+    environment:
+      TZ: Asia/Tehran
+
+    mem_limit: 16m
+    mem_reservation: 8m
+
+    cpus: 0.50
+    pids_limit: 100
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
     networks:
       - backup-net
 

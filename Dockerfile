@@ -10,8 +10,8 @@ COPY requirements.txt .
 
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY ../src ./src
+COPY src ./src
 
 RUN mkdir -p /app/config
 
-CMD ["python", "-m", "src.main"]
+CMD ["python", "-u", "-m", "src.main"]
