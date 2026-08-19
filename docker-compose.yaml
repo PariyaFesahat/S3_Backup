@@ -10,7 +10,8 @@ services:
     volumes:
       # Local PostgreSQL backups
       - /opt/test:/opt/test:rw
-
+      - /opt/test2:/opt/test2:rw
+      
       # Configuration
       - ./config/config.yaml:/app/config/config.yaml:ro
 
