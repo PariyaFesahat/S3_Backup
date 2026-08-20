@@ -1,54 +1,23 @@
-# S3 Backup
+# S3 Backup Watcher
 
-Python application for uploading backup directories from a Linux server to an S3-compatible object storage service such as MinIO.
-
-## Overview
-
-The application scans a configured local backup directory and uploads each backup directory to S3.
-
-For example:
-
-```text
-/dump/
-├── back090087/
-├── back090088/
-└── back090089/
-```
-
-The backups are stored using the server hostname and the directory date:
-
-```text
-postgres/
-└── server01/
-    └── 2026-08-17/
-        ├── back090087/
-        ├── back090088/
-        └── back090089/
-```
-
-The date is determined from the directory modification time (`mtime`), which is the timestamp normally displayed by `ls -l`.
-
-The application does not overwrite an existing backup directory in S3.
+A Python filesystem watcher that automatically synchronizes files from one or more local directories to an S3-compatible storage service such as MinIO.
 
 ## Features
 
-- Upload backup directories from a Linux server.
-- Support for S3-compatible storage such as MinIO.
-- Automatically uses the server hostname in the S3 path.
-- Uses the local backup directory's `mtime` as the backup date.
-- Preserves original backup directory and file names.
-- Groups multiple backup directories with the same date under one date directory.
-- Skips a backup directory if it already exists in S3.
-- Configuration is stored in YAML.
-- S3 credentials are currently stored in the YAML configuration.
-
-## Requirements
-
-- Python 3.9+
-- Linux/Ubuntu server
-- S3-compatible storage
-- MinIO or another S3-compatible server
-- Network access from the backup server to the S3 endpoint
+- Watch multiple directories recursively.
+- Detect new, modified, deleted, and moved files.
+- Automatically synchronize changes to S3-compatible storage.
+- Supports MinIO and other S3-compatible services.
+- Preserve original filenames.
+- Organize backups by server name, backup date, and backup directory.
+- Multiple backup directories created on the same date share the same date directory.
+- Ignore temporary/editor files such as `.swp`, `.swo`, `.swn`, `*~`, and `.#*`.
+- Configurable filesystem-event debounce.
+- Multipart uploads for large files.
+- Configurable S3 retry attempts and upload concurrency.
+- Logs are written to stdout for Docker.
+- Docker CPU, memory, PID, and log limits can be configured.
+- Configurable timezone.
 
 ## Project Structure
 
@@ -60,26 +29,399 @@ S3_Backup/
 │   ├── __init__.py
 │   ├── backup.py
 │   ├── config.py
+│   ├── logging_config.py
 │   ├── main.py
-│   └── s3.py
+│   ├── manager.py
+│   ├── s3.py
+│   └── watcher.py
 ├── tests/
-│   └── __init__.py
+├── Dockerfile
+├── docker-compose.yml
 ├── requirements.txt
+├── .dockerignore
 ├── .gitignore
+├── TODO.md
 └── README.md
+```
+
+## Configuration
+
+Example `config/config.yaml`:
+
+```yaml
+server:
+  name: "db-server-01"
+
+backup:
+  source_dirs:
+    - "/opt/test"
+    - "/dump"
+
+s3:
+  endpoint_url: "http://192.168.1.50:9000"
+  access_key: "minioadmin"
+  secret_key: "minioadmin123"
+  bucket: "my-postgres-backups"
+  prefix: "postgres/"
+  region: "us-east-1"
+
+  upload:
+    max_attempts: 10
+    max_concurrency: 2
+    multipart_threshold_mb: 64
+    multipart_chunksize_mb: 64
+
+retention:
+  days: 10
+
+watcher:
+  debounce_seconds: 5
+
+logging:
+  level: INFO
+```
+
+## Server Name
+
+The server name identifies the host that produced the backup:
+
+```yaml
+server:
+  name: "db-server-01"
+```
+
+Use a unique name on each server:
+
+```text
+db-server-01
+db-server-02
+db-server-03
+```
+
+The configured name is used instead of the Docker container hostname.
+
+## Backup Directories
+
+Multiple directories can be configured:
+
+```yaml
+backup:
+  source_dirs:
+    - "/opt/test"
+    - "/dump"
+    - "/db_dump"
+```
+
+Every configured directory is watched recursively.
+
+All file extensions are supported.
+
+Example:
+
+```text
+/dump/
+├── backup001/
+│   ├── database.dump
+│   └── metadata.txt
+├── backup002/
+│   └── database.sql
+└── backup003/
+    └── backup.tar
+```
+
+## S3 / MinIO
+
+The application uses `boto3` and communicates with an S3-compatible API.
+
+For MinIO running directly on the Ubuntu host:
+
+```yaml
+endpoint_url: "http://localhost:9000"
+```
+
+If MinIO is another container on the same Docker network:
+
+```yaml
+endpoint_url: "http://minio:9000"
+```
+
+If MinIO is running on another host:
+
+```yaml
+endpoint_url: "http://192.168.1.50:9000"
+```
+
+## S3 Backup Layout
+
+Backups are stored using:
+
+```text
+<prefix>/<server-name>/<backup-date>/<backup-directory>/
+```
+
+Example:
+
+```text
+postgres/
+└── db-server-01/
+    ├── 2026-08-19/
+    │   ├── backup001/
+    │   │   ├── database.dump
+    │   │   └── metadata.txt
+    │   └── backup002/
+    │       └── database.dump
+    └── 2026-08-20/
+        └── backup003/
+            └── database.dump
+```
+
+This keeps backups from different servers separated.
+
+Multiple backup directories created on the same date are stored under the same date directory.
+
+## Backup Date
+
+The backup date is based on the filesystem timestamp of the top-level backup directory.
+
+For example:
+
+```text
+/dump/backup001
+```
+
+The directory timestamp corresponds to the timestamp displayed by commands such as:
+
+```bash
+ls -alh /dump
+```
+
+The resulting date is used in the S3 path:
+
+```text
+YYYY-MM-DD
+```
+
+## Synchronization
+
+When the application starts, existing backup directories are synchronized.
+
+After startup, the filesystem watcher continuously monitors the configured directories.
+
+The workflow is:
+
+```text
+Filesystem change
+       |
+       v
+Watchdog event
+       |
+       v
+Debounce
+       |
+       v
+BackupManager
+       |
+       v
+S3 synchronization
+```
+
+New or modified files are uploaded.
+
+Deleted files are removed from the corresponding S3 backup during synchronization.
+
+## Temporary Files
+
+The watcher ignores temporary/editor files:
+
+```text
+*.swp
+*.swo
+*.swn
+*~
+.#*
+```
+
+Examples:
+
+```text
+.test.txt.swp
+test.txt~
+.#test.txt
+```
+
+These files are not uploaded.
+
+## Debounce
+
+The watcher uses a debounce period to prevent a large number of filesystem events from triggering many immediate synchronization operations.
+
+Example:
+
+```yaml
+watcher:
+  debounce_seconds: 5
+```
+
+If several changes happen within the debounce period, they are grouped into one synchronization.
+
+## Large File Uploads
+
+Large files use multipart uploads.
+
+Example:
+
+```yaml
+s3:
+  upload:
+    max_attempts: 10
+    max_concurrency: 2
+    multipart_threshold_mb: 64
+    multipart_chunksize_mb: 64
+```
+
+### Retry attempts
+
+```yaml
+max_attempts: 10
+```
+
+Increases the retry budget for transient S3/MinIO failures.
+
+### Upload concurrency
+
+```yaml
+max_concurrency: 2
+```
+
+Limits simultaneous multipart upload operations.
+
+This is useful when MinIO returns:
+
+```text
+429 Too Many Requests
+```
+
+### Multipart threshold
+
+```yaml
+multipart_threshold_mb: 64
+```
+
+Files larger than 64 MB use multipart uploads.
+
+### Multipart chunk size
+
+```yaml
+multipart_chunksize_mb: 64
+```
+
+Each multipart part is 64 MB.
+
+## Docker
+
+Example Docker Compose configuration:
+
+```yaml
+services:
+  s3-backup:
+    build: .
+
+    container_name: s3-backup
+
+    restart: unless-stopped
+
+    volumes:
+      - /dump:/dump:rw
+      - /opt/test:/opt/test:rw
+      - ./config/config.yaml:/app/config/config.yaml:ro
+
+    environment:
+      TZ: Asia/Tehran
+
+    mem_limit: 512m
+    mem_reservation: 128m
+    cpus: 0.50
+    pids_limit: 100
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+```
+
+### Resource limits
+
+```yaml
+mem_limit: 512m
+```
+
+Maximum memory available to the container.
+
+```yaml
+mem_reservation: 128m
+```
+
+Soft memory reservation.
+
+```yaml
+cpus: 0.50
+```
+
+Limits the container to approximately half of one CPU core.
+
+```yaml
+pids_limit: 100
+```
+
+Limits the number of processes/threads inside the container.
+
+## Docker Logging
+
+The application writes logs to stdout.
+
+View logs:
+
+```bash
+docker compose logs -f s3-backup
+```
+
+Or:
+
+```bash
+docker logs -f s3-backup
+```
+
+Docker log rotation:
+
+```yaml
+logging:
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+```
+
+This keeps up to five log files, each limited to approximately 10 MB.
+
+## Timezone
+
+The Docker container can use the Tehran timezone:
+
+```yaml
+environment:
+  TZ: Asia/Tehran
+```
+
+Check the container time:
+
+```bash
+docker exec s3-backup date
 ```
 
 ## Installation
 
-Clone or copy the project to the server:
-
-```bash
-cd /home/<user>/
-git clone <repository-url> S3_Backup
-cd S3_Backup
-```
-
-Create a Python virtual environment:
+Create a virtual environment:
 
 ```bash
 python3 -m venv .venv
@@ -97,66 +439,168 @@ Install dependencies:
 pip install -r requirements.txt
 ```
 
-## Configuration
+Run locally from the repository root:
 
-Create:
+```bash
+python -m src.main
+```
+
+## Docker Commands
+
+Build:
+
+```bash
+docker compose build
+```
+
+Start:
+
+```bash
+docker compose up -d
+```
+
+View logs:
+
+```bash
+docker compose logs -f s3-backup
+```
+
+Stop:
+
+```bash
+docker compose down
+```
+
+Restart:
+
+```bash
+docker compose restart s3-backup
+```
+
+Rebuild after code changes:
+
+```bash
+docker compose down
+docker compose build
+docker compose up -d
+```
+
+Check status:
+
+```bash
+docker ps
+```
+
+Check resource usage:
+
+```bash
+docker stats s3-backup
+```
+
+## MinIO Connectivity
+
+If MinIO exposes port 9000:
+
+```bash
+docker ps
+```
+
+You should see something similar to:
 
 ```text
-config/config.yaml
+0.0.0.0:9000->9000/tcp
 ```
 
-Example:
+Test the S3 API:
 
-```yaml
-backup:
-  source_dir: /dump
-
-s3:
-  endpoint_url: "http://localhost:9000"
-  access_key: "your-access-key"
-  secret_key: "your-secret-key"
-  bucket: "my-postgres-backups"
-  prefix: "postgres"
-  region: "us-east-1"
-
-retention:
-  days: 10
-
-logging:
-  level: INFO
+```bash
+curl http://127.0.0.1:9000
 ```
 
-### Configuration Options
+An `AccessDenied` XML response is expected when accessing the S3 API without authentication. It confirms that the endpoint is reachable.
 
-#### Backup
+## Troubleshooting
 
-| Option | Description |
-|---|---|
-| `source_dir` | Directory containing backup directories |
+### YAML error
 
-The application searches for directories directly under `source_dir`.
+For:
 
-#### S3
+```text
+yaml.scanner.ScannerError:
+sequence entries are not allowed here
+```
 
-| Option | Description |
-|---|---|
-| `endpoint_url` | S3-compatible storage endpoint |
-| `access_key` | S3/MinIO access key |
-| `secret_key` | S3/MinIO secret key |
-| `bucket` | Destination bucket |
-| `prefix` | Root prefix for uploaded backups |
-| `region` | S3 region |
+check the configuration:
 
-For MinIO, the S3 API normally uses port `9000`:
+```bash
+nl -ba config/config.yaml
+```
+
+Validate it:
+
+```bash
+python -c "import yaml; print(yaml.safe_load(open('config/config.yaml')))"
+```
+
+### S3 credentials error
+
+Make sure the YAML contains:
 
 ```yaml
 s3:
-  endpoint_url: "http://192.168.1.100:9000"
+  access_key: "..."
+  secret_key: "..."
 ```
 
-The MinIO web console port, commonly `9001`, should not be used as the S3 endpoint.
+The key must be named `secret_key`.
 
-#### Retention
+### MinIO connection error
+
+Check the endpoint:
+
+```bash
+curl http://<minio-host>:9000
+```
+
+Inside a Docker container, `localhost` refers to that container itself, not the Ubuntu host or another container.
+
+### Container continuously restarting
+
+Check:
+
+```bash
+docker compose logs --tail=200 s3-backup
+```
+
+Then:
+
+```bash
+docker inspect s3-backup --format='OOMKilled={{.State.OOMKilled}} ExitCode={{.State.ExitCode}}'
+```
+
+Exit code `137` commonly indicates the process was killed with `SIGKILL`, often because the container exceeded its memory limit.
+
+### HTTP 429 Too Many Requests
+
+If a large multipart upload fails with:
+
+```text
+429 Too Many Requests
+```
+
+reduce upload concurrency:
+
+```yaml
+max_concurrency: 2
+```
+
+and increase retry attempts:
+
+```yaml
+max_attempts: 10
+```
+
+## Retention
 
 The configuration contains:
 
@@ -165,274 +609,20 @@ retention:
   days: 10
 ```
 
-The retention setting is reserved for the backup cleanup functionality.
+The intended policy is to retain backups for 10 days.
 
-## Running the Application
-
-Run the application from the project root:
-
-```bash
-cd /home/<user>/S3_Backup
-source .venv/bin/activate
-python -m src.main
-```
-
-Example output:
-
-```text
-Found 3 backup directory(s):
-  /dump/back090087
-  /dump/back090088
-  /dump/back090089
-
-Checking S3 bucket: my-postgres-backups
-S3 bucket is accessible.
-
-Processing: back090087 (date: 2026-08-17)
-Uploading: /dump/back090087/backup.dump
-       to: s3://my-postgres-backups/postgres/server01/2026-08-17/back090087/backup.dump
-Backup uploaded: back090087 -> 2026-08-17
-```
-
-## S3 Directory Structure
-
-The application creates:
-
-```text
-<prefix>/
-└── <server-hostname>/
-    └── <backup-date>/
-        └── <backup-directory>/
-            └── backup-files
-```
-
-Example:
-
-```text
-postgres/
-└── db-server-01/
-    ├── 2026-08-15/
-    │   └── back090080/
-    │       └── backup.dump
-    ├── 2026-08-16/
-    │   ├── back090081/
-    │   │   └── backup.dump
-    │   └── back090082/
-    │       └── backup.dump
-    └── 2026-08-17/
-        ├── back090083/
-        │   └── backup.dump
-        └── back090084/
-            └── backup.dump
-```
-
-Multiple backup directories with the same date are stored under the same date directory.
-
-## Duplicate Handling
-
-The application does not overwrite an existing backup directory.
-
-If this already exists:
-
-```text
-postgres/
-└── db-server-01/
-    └── 2026-08-17/
-        └── back090087/
-            └── backup.dump
-```
-
-and `/dump/back090087` is processed again, the application skips it.
-
-The existing S3 backup is not modified.
-
-A new directory such as:
-
-```text
-/dump/back090088/
-```
-
-will still be uploaded to:
-
-```text
-postgres/db-server-01/2026-08-17/back090088/
-```
-
-## Directory Date
-
-The backup date is obtained from the directory modification timestamp:
-
-```python
-backup_dir.stat().st_mtime
-```
-
-This corresponds to the timestamp normally shown by:
-
-```bash
-ls -l /dump
-```
-
-For example:
-
-```text
-drwxr-xr-x 2 postgres postgres 4096 Aug 17 09:30 back090087
-```
-
-will result in the S3 date directory:
-
-```text
-2026-08-17
-```
-
-## Testing
-
-Create a test directory:
-
-```bash
-mkdir -p /opt/test/back090087
-```
-
-Create a test file:
-
-```bash
-echo "test backup" > /opt/test/back090087/test.dump
-```
-
-Update the configuration:
-
-```yaml
-backup:
-  source_dir: /opt/test
-```
-
-Run:
-
-```bash
-python -m src.main
-```
-
-Verify that the file appears in MinIO.
+Retention cleanup should be implemented/enabled in the application before relying on this setting for automatic deletion.
 
 ## Security
 
-The current configuration stores S3 credentials in:
-
-```text
-config/config.yaml
-```
-
-Do not commit this file to a public Git repository.
-
-Add it to `.gitignore`:
-
-```gitignore
-config/config.yaml
-.venv/
-__pycache__/
-*.pyc
-```
-
-Keep a template configuration such as:
-
-```text
-config/
-├── config.yaml
-└── config.example.yaml
-```
-
-Example:
+The current configuration stores S3 credentials in YAML:
 
 ```yaml
-s3:
-  endpoint_url: "http://localhost:9000"
-  access_key: "YOUR_ACCESS_KEY"
-  secret_key: "YOUR_SECRET_KEY"
-  bucket: "my-postgres-backups"
+access_key: "..."
+secret_key: "..."
 ```
 
-In a future version, credentials should preferably be moved to environment variables or another secret-management mechanism.
+Do not commit production credentials to Git.
 
-## Troubleshooting
+For production, consider environment variables or Docker secrets.
 
-### Cannot access S3 bucket
-
-Check the S3 endpoint:
-
-```yaml
-s3:
-  endpoint_url: "http://localhost:9000"
-```
-
-Check that MinIO is running:
-
-```bash
-systemctl status minio
-```
-
-or, if running with Docker:
-
-```bash
-docker ps
-```
-
-Check connectivity:
-
-```bash
-curl http://localhost:9000
-```
-
-### No backup directories found
-
-Check the configured source:
-
-```bash
-ls -alh /dump
-```
-
-The application only processes directories directly under the configured `source_dir`.
-
-Expected structure:
-
-```text
-/dump/
-├── back090087/
-├── back090088/
-└── back090089/
-```
-
-### Backup is skipped
-
-If the application reports:
-
-```text
-Skipping: back090087 already exists in S3
-```
-
-the backup directory has already been uploaded to the corresponding S3 date directory.
-
-This is intentional and prevents an existing backup from being overwritten.
-
-## Dependencies
-
-```text
-boto3
-PyYAML
-```
-
-Install them with:
-
-```bash
-pip install -r requirements.txt
-```
-
-## Future Improvements
-
-- Implement 10-day backup retention.
-- Move S3 credentials to environment variables.
-- Add structured logging.
-- Add retry handling for failed uploads.
-- Add upload progress reporting.
-- Add systemd service/timer for automatic execution.
-- Add automated tests.
-- Add checksum verification after upload.
-- Add notifications when an upload fails.
