@@ -1,4 +1,4 @@
-FROM python:3.12-slim
+FROM hub.hamdocker.ir/python:3.12-slim
 
 WORKDIR /app
 

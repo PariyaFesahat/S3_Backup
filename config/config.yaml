@@ -1,9 +1,13 @@
+server:
+  name: "db-server-01"
+
 backup:
   source_dirs:
     - "/opt/test"
     - "/opt/test2"
+
 s3:
-  endpoint_url: "http://local-s3:9000"
+  endpoint_url: "http://localhost:9000"
   access_key: "minioadmin"
   secret_key: "minioadmin123"
   bucket: "my-postgres-backups"
