@@ -1,18 +1,24 @@
 server:
   name: "db-server-01"
 
-backup:
-  source_dirs:
-    - "/opt/test"
-    - "/opt/test2"
+targets:
+  - name: "primary-minio"
+    enabled: true
+    bucket: "my-postgres-backups"
+    region: "us-east-1"
+    endpoint_url: "http://localhost:9000"
+    access_key_id: "minioadmin"
+    secret_access_key: "minioadmin123"
+    prefix: "postgres/"
 
-s3:
-  endpoint_url: "http://localhost:9000"
-  access_key: "minioadmin"
-  secret_key: "minioadmin123"
-  bucket: "my-postgres-backups"
-  prefix: "postgres/"
-  region: "us-east-1"
+mappings:
+  - path: "/opt/test"
+    target_name: "primary-minio"
+    enabled: true
+
+  - path: "/opt/test2"
+    target_name: "primary-minio"
+    enabled: true
 
 retention:
   days: 10

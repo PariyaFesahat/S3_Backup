@@ -192,17 +192,17 @@ class BackupWatcher:
 
     def __init__(
         self,
-        source_dirs: list[str],
-        manager,
+        path_managers: list[tuple[str, object]],
         debounce_seconds: int = 5,
     ):
 
-        self.source_dirs = [
-            Path(path).resolve()
-            for path in source_dirs
+        # Each mapping may route to a different S3 target, so each
+        # watched path gets its own BackupManager (bound to that
+        # mapping's S3Client) rather than sharing a single manager.
+        self.path_managers = [
+            (Path(path).resolve(), manager)
+            for path, manager in path_managers
         ]
-
-        self.manager = manager
 
         self.debounce_seconds = (
             debounce_seconds
@@ -212,7 +212,7 @@ class BackupWatcher:
 
         observers = []
 
-        for source_dir in self.source_dirs:
+        for source_dir, manager in self.path_managers:
 
             if not source_dir.exists():
 
@@ -234,7 +234,7 @@ class BackupWatcher:
 
             event_handler = BackupEventHandler(
                 source_dir=source_dir,
-                manager=self.manager,
+                manager=manager,
                 debounce_seconds=(
                     self.debounce_seconds
                 ),

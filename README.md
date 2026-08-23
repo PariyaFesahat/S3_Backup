@@ -1,13 +1,14 @@
 # S3 Backup Watcher
 
-A Python filesystem watcher that automatically synchronizes files from one or more local directories to an S3-compatible storage service such as MinIO.
+A Python filesystem watcher that automatically synchronizes files from one or more local directories to one or more S3-compatible storage destinations, such as MinIO, AWS S3, or Wasabi.
 
 ## Features
 
 - Watch multiple directories recursively.
+- Route each local path to its own S3 destination (bucket, region, credentials) via an explicit path -> target mapping.
 - Detect new, modified, deleted, and moved files.
 - Automatically synchronize changes to S3-compatible storage.
-- Supports MinIO and other S3-compatible services.
+- Supports MinIO, AWS S3, and other S3-compatible services.
 - Preserve original filenames.
 - Organize backups by server name, backup date, and backup directory.
 - Multiple backup directories created on the same date share the same date directory.
@@ -15,6 +16,7 @@ A Python filesystem watcher that automatically synchronizes files from one or mo
 - Configurable filesystem-event debounce.
 - Multipart uploads for large files.
 - Configurable S3 retry attempts and upload concurrency.
+- A failure uploading one path does not stop the others; a summary is logged at the end of each run.
 - Logs are written to stdout for Docker.
 - Docker CPU, memory, PID, and log limits can be configured.
 - Configurable timezone.
@@ -26,7 +28,6 @@ S3_Backup/
 ├── config/
 │   └── config.yaml
 ├── src/
-│   ├── __init__.py
 │   ├── backup.py
 │   ├── config.py
 │   ├── logging_config.py
@@ -35,9 +36,13 @@ S3_Backup/
 │   ├── s3.py
 │   └── watcher.py
 ├── tests/
+│   ├── test_config.py
+│   └── test_main.py
 ├── Dockerfile
 ├── docker-compose.yml
 ├── requirements.txt
+├── requirements-dev.txt
+├── pytest.ini
 ├── .dockerignore
 ├── .gitignore
 ├── TODO.md
@@ -52,24 +57,42 @@ Example `config/config.yaml`:
 server:
   name: "db-server-01"
 
-backup:
-  source_dirs:
-    - "/opt/test"
-    - "/dump"
+# Named S3 destinations. Each target is a distinct bucket, and may use
+# a different account/region/endpoint/credentials.
+targets:
+  - name: "primary-minio"
+    enabled: true
+    bucket: "my-postgres-backups"
+    region: "us-east-1"
+    endpoint_url: "http://192.168.1.50:9000"
+    access_key_id: "minioadmin"
+    secret_access_key: "minioadmin123"
+    prefix: "postgres/"
 
-s3:
-  endpoint_url: "http://192.168.1.50:9000"
-  access_key: "minioadmin"
-  secret_key: "minioadmin123"
-  bucket: "my-postgres-backups"
-  prefix: "postgres/"
-  region: "us-east-1"
+  - name: "offsite-wasabi"
+    enabled: true
+    bucket: "offsite-backups"
+    region: "us-east-2"
+    endpoint_url: "https://s3.wasabisys.com"
+    access_key_id: "${WASABI_ACCESS_KEY}"      # resolved from the environment
+    secret_access_key: "${WASABI_SECRET_KEY}"
 
-  upload:
-    max_attempts: 10
-    max_concurrency: 2
-    multipart_threshold_mb: 64
-    multipart_chunksize_mb: 64
+  - name: "archive-glacier"
+    enabled: false                             # target off; any mapping using it is skipped
+    bucket: "archive-bucket"
+    region: "eu-central-1"
+    profile: "archive-role"                    # AWS named profile / IAM role instead of static keys
+
+# Each local path is explicitly routed to exactly one target above.
+mappings:
+  - path: "/opt/test"
+    target_name: "primary-minio"
+    enabled: true
+
+  - path: "/dump"
+    target_name: "offsite-wasabi"
+    destination_prefix: "dump-backups/"        # overrides the target's own `prefix` for this path
+    enabled: true
 
 retention:
   days: 10
@@ -80,6 +103,49 @@ watcher:
 logging:
   level: INFO
 ```
+
+## S3 Targets
+
+`targets` is a list of named S3 destinations. Each entry supports:
+
+| field | required | notes |
+|---|---|---|
+| `name` | yes | unique identifier, referenced by `mappings[].target_name` |
+| `bucket` | yes | destination bucket |
+| `region` | no | default `us-east-1` |
+| `endpoint_url` | no | for MinIO/Wasabi/other S3-compatible services |
+| `access_key_id` / `secret_access_key` | no | must both be set, or both omitted |
+| `profile` | no | AWS named profile/IAM role; mutually exclusive with the key pair |
+| `prefix` | no | default S3 key prefix for this target |
+| `enabled` | no | default `true`; set `false` to disable the target without deleting its config |
+
+If neither a key pair nor `profile` is set, boto3's default credential chain is used (environment variables, `~/.aws/credentials`, or an IAM role).
+
+Values may reference environment variables with `${VAR_NAME}` syntax (e.g. for secrets you don't want committed to Git); the app fails fast with a clear error if the referenced variable isn't set.
+
+## Path -> Target Mappings
+
+`mappings` is a list that explicitly assigns each local backup path to exactly one S3 target — paths are **not** fanned out to every target.
+
+| field | required | notes |
+|---|---|---|
+| `path` | yes | local directory to watch/back up; must be unique across mappings |
+| `target_name` | yes | must match a `targets[].name` |
+| `destination_prefix` | no | if set, replaces (does not append to) the target's own `prefix` for this path |
+| `enabled` | no | default `true`; disables just this path -> target link |
+
+Config loading fails fast with a clear error if:
+
+- a mapping references a `target_name` that doesn't exist in `targets`
+- the same path is assigned to more than one enabled mapping
+- an `access_key_id`/`secret_access_key` pair is only half-set, or combined with `profile`
+- no mappings remain active after applying `enabled` flags on both mappings and targets
+
+A mapping pointed at a *disabled* target is not a config error — it's simply skipped at runtime and reported in the summary, so toggling a target off pauses everything routed to it without editing `mappings`.
+
+### Legacy single-bucket format
+
+If `config.yaml` still uses the old format (`backup.source_dirs` + a single `s3:` block, no `targets`/`mappings`), it's auto-migrated at load time: one target is generated from the `s3:` block, and one mapping per `source_dirs` entry is generated pointing at it. A deprecation warning is logged. Update the file to the new format above when convenient — the migration shim may be removed in a future version.
 
 ## Server Name
 
@@ -102,17 +168,21 @@ The configured name is used instead of the Docker container hostname.
 
 ## Backup Directories
 
-Multiple directories can be configured:
+Backup paths are declared as `mappings[].path` entries — there is no separate directory list; a path is only watched if it appears in `mappings`:
 
 ```yaml
-backup:
-  source_dirs:
-    - "/opt/test"
-    - "/dump"
-    - "/db_dump"
+mappings:
+  - path: "/opt/test"
+    target_name: "primary-minio"
+
+  - path: "/dump"
+    target_name: "offsite-wasabi"
+
+  - path: "/db_dump"
+    target_name: "primary-minio"
 ```
 
-Every configured directory is watched recursively.
+Every path in `mappings` is watched recursively and synchronized only to its assigned target.
 
 All file extensions are supported.
 
@@ -156,8 +226,10 @@ endpoint_url: "http://192.168.1.50:9000"
 Backups are stored using:
 
 ```text
-<prefix>/<server-name>/<backup-date>/<backup-directory>/
+<target-or-mapping-prefix>/<server-name>/<backup-date>/<backup-directory>/
 ```
+
+The prefix is the mapping's `destination_prefix` if set, otherwise the target's own `prefix`.
 
 Example:
 
@@ -266,56 +338,12 @@ If several changes happen within the debounce period, they are grouped into one 
 
 ## Large File Uploads
 
-Large files use multipart uploads.
+Large files use multipart uploads. These values currently apply uniformly to every target and are fixed in `src/s3.py` (not read from `config.yaml`):
 
-Example:
-
-```yaml
-s3:
-  upload:
-    max_attempts: 10
-    max_concurrency: 2
-    multipart_threshold_mb: 64
-    multipart_chunksize_mb: 64
-```
-
-### Retry attempts
-
-```yaml
-max_attempts: 10
-```
-
-Increases the retry budget for transient S3/MinIO failures.
-
-### Upload concurrency
-
-```yaml
-max_concurrency: 2
-```
-
-Limits simultaneous multipart upload operations.
-
-This is useful when MinIO returns:
-
-```text
-429 Too Many Requests
-```
-
-### Multipart threshold
-
-```yaml
-multipart_threshold_mb: 64
-```
-
-Files larger than 64 MB use multipart uploads.
-
-### Multipart chunk size
-
-```yaml
-multipart_chunksize_mb: 64
-```
-
-Each multipart part is 64 MB.
+- Retry attempts: `max_attempts: 10`, `mode: adaptive` — retry budget for transient S3/MinIO failures.
+- Upload concurrency: `max_concurrency: 2` — limits simultaneous multipart upload operations; useful when MinIO returns `429 Too Many Requests`.
+- Multipart threshold: `64 MB` — files larger than this use multipart uploads.
+- Multipart chunk size: `64 MB` — size of each multipart part.
 
 ## Docker
 
@@ -445,6 +473,13 @@ Run locally from the repository root:
 python -m src.main
 ```
 
+To run the test suite (uses `pytest` and `moto` to mock S3):
+
+```bash
+pip install -r requirements-dev.txt
+pytest
+```
+
 ## Docker Commands
 
 Build:
@@ -544,15 +579,30 @@ python -c "import yaml; print(yaml.safe_load(open('config/config.yaml')))"
 
 ### S3 credentials error
 
-Make sure the YAML contains:
+Make sure each target in `targets:` contains a matched pair:
 
 ```yaml
-s3:
-  access_key: "..."
-  secret_key: "..."
+targets:
+  - name: "primary-minio"
+    access_key_id: "..."
+    secret_access_key: "..."
 ```
 
-The key must be named `secret_key`.
+`access_key_id` and `secret_access_key` must both be set, or both omitted (to fall back to a `profile` or the default AWS credential chain). Setting only one raises a config error at startup naming the offending target.
+
+### Unknown target / duplicate path error
+
+```text
+Mapping for path '/opt/test' references unknown target 'primary-mino'. Known targets: primary-minio, offsite-wasabi
+```
+
+Check for typos in `mappings[].target_name`, and confirm the target is spelled identically in `targets[].name`.
+
+```text
+Path '/opt/test' is mapped to multiple targets ('primary-minio', 'offsite-wasabi'); each path must map to exactly one target
+```
+
+Each `path` may appear in at most one *enabled* mapping. Disable or remove the extra mapping.
 
 ### MinIO connection error
 
@@ -615,14 +665,16 @@ Retention cleanup should be implemented/enabled in the application before relyin
 
 ## Security
 
-The current configuration stores S3 credentials in YAML:
+S3 credentials can be stored directly in YAML per target:
 
 ```yaml
-access_key: "..."
-secret_key: "..."
+targets:
+  - name: "primary-minio"
+    access_key_id: "..."
+    secret_access_key: "..."
 ```
 
 Do not commit production credentials to Git.
 
-For production, consider environment variables or Docker secrets.
+For production, prefer `${ENV_VAR}` interpolation (resolved from the environment at load time), an AWS `profile`, Docker secrets, or an IAM role — omit `access_key_id`/`secret_access_key` entirely to use the default AWS credential chain.
 

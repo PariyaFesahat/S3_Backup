@@ -1,23 +1,33 @@
 import logging
 from pathlib import Path
+from typing import Optional
 
 import boto3
 from boto3.s3.transfer import TransferConfig
 from botocore.config import Config
 from botocore.exceptions import ClientError
 
+from .config import S3TargetConfig
+
 
 logger = logging.getLogger(__name__)
 
 
 class S3Client:
-    def __init__(self, config: dict):
-        s3_config = config["s3"]
-        server_config = config["server"]
-
-        self.bucket = s3_config["bucket"]
-        self.prefix = s3_config.get("prefix", "")
-        self.server_name = server_config["name"]
+    def __init__(
+        self,
+        target: S3TargetConfig,
+        server_name: str,
+        prefix_override: Optional[str] = None,
+    ):
+        self.target_name = target.name
+        self.bucket = target.bucket
+        self.prefix = (
+            prefix_override
+            if prefix_override is not None
+            else target.prefix
+        )
+        self.server_name = server_name
 
         # Retry configuration
         retry_config = Config(
@@ -27,17 +37,25 @@ class S3Client:
             }
         )
 
-        self.client = boto3.client(
-            "s3",
-            endpoint_url=s3_config["endpoint_url"],
-            aws_access_key_id=s3_config["access_key"],
-            aws_secret_access_key=s3_config["secret_key"],
-            region_name=s3_config.get(
-                "region",
-                "us-east-1",
-            ),
-            config=retry_config,
-        )
+        client_kwargs = {
+            "region_name": target.region,
+            "config": retry_config,
+        }
+
+        if target.endpoint_url:
+            client_kwargs["endpoint_url"] = target.endpoint_url
+
+        if target.access_key_id and target.secret_access_key:
+            client_kwargs["aws_access_key_id"] = target.access_key_id
+            client_kwargs["aws_secret_access_key"] = (
+                target.secret_access_key
+            )
+
+        if target.profile:
+            session = boto3.Session(profile_name=target.profile)
+            self.client = session.client("s3", **client_kwargs)
+        else:
+            self.client = boto3.client("s3", **client_kwargs)
 
         # Multipart upload configuration
         #
@@ -52,8 +70,9 @@ class S3Client:
         )
 
         logger.info(
-            "S3 client initialized for server: %s",
-            self.server_name,
+            "S3 client initialized for target: %s (bucket=%s)",
+            self.target_name,
+            self.bucket,
         )
 
         logger.info(
@@ -74,7 +93,7 @@ class S3Client:
         except ClientError as exc:
             raise RuntimeError(
                 f"Cannot access S3 bucket "
-                f"'{self.bucket}': {exc}"
+                f"'{self.bucket}' for target '{self.target_name}': {exc}"
             ) from exc
 
     def get_backup_prefix(
@@ -150,10 +169,11 @@ class S3Client:
         file_path = file_path.resolve()
 
         logger.info(
-            "Uploading: %s -> s3://%s/%s",
+            "Uploading: %s -> s3://%s/%s (target: %s)",
             file_path,
             self.bucket,
             object_key,
+            self.target_name,
         )
 
         try:
@@ -168,8 +188,9 @@ class S3Client:
         except Exception:
 
             logger.exception(
-                "Upload failed: %s",
+                "Upload failed: %s (target: %s)",
                 file_path,
+                self.target_name,
             )
 
             raise
@@ -187,9 +208,10 @@ class S3Client:
     ) -> None:
 
         logger.info(
-            "Deleting S3 object: s3://%s/%s",
+            "Deleting S3 object: s3://%s/%s (target: %s)",
             self.bucket,
             object_key,
+            self.target_name,
         )
 
         self.client.delete_object(
