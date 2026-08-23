@@ -1,0 +1,3 @@
+-r requirements.txt
+pytest
+moto[s3]
