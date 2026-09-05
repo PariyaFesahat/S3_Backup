@@ -49,5 +49,22 @@ services:
     networks:
       - backup-net
 
+  minio2:
+    image: hub.hamdocker.ir/minio/minio:latest
+    container_name: local-s3-2
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+      - "8001:8001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin123
+    volumes:
+      - ./data:/data
+    command: server /data --console-address ":8001"
+    networks:
+      - backup-net
+
+
 networks:
   backup-net:
