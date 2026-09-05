@@ -5,6 +5,7 @@ from .backup import find_backup_directories
 from .config import AppConfig, ConfigError, MappingConfig, load_config
 from .logging_config import setup_logging
 from .manager import BackupManager
+from .retention import RetentionScheduler
 from .s3 import S3Client
 from .watcher import BackupWatcher
 
@@ -136,6 +137,32 @@ def _run_initial_sync(
     return results
 
 
+def _build_retention_scheduler(
+    config: AppConfig,
+    runners: list[tuple[MappingConfig, BackupManager]],
+) -> RetentionScheduler:
+    """
+    Build a retention scheduler covering every distinct S3 location
+    the app actually backs up to. Mappings that share the same
+    target/prefix (bucket + server prefix) are deduplicated so
+    retention isn't run twice against the same objects.
+    """
+
+    unique_clients = {}
+
+    for _mapping, manager in runners:
+        s3_client = manager.s3
+        key = (s3_client.bucket, s3_client.get_server_prefix())
+        unique_clients.setdefault(key, s3_client)
+
+    return RetentionScheduler(
+        s3_clients=list(unique_clients.values()),
+        retention_days=config.retention.days,
+        server_name=config.server.name,
+        interval_hours=config.retention.cleanup_interval_hours,
+    )
+
+
 def _log_summary(
     results: list[tuple[MappingConfig, str, str]],
     skipped: list[tuple[MappingConfig, str]],
@@ -203,6 +230,17 @@ def main():
     results = _run_initial_sync(runners)
 
     _log_summary(results, skipped)
+
+    # -------------------------------------------------
+    # Retention cleanup
+    #
+    # Runs on its own background thread: once immediately, then every
+    # `cleanup_interval_hours`. Fully independent from the watcher --
+    # it never blocks it, and cleanup errors never stop it.
+    # -------------------------------------------------
+
+    retention_scheduler = _build_retention_scheduler(config, runners)
+    retention_scheduler.start()
 
     # -------------------------------------------------
     # Start watcher

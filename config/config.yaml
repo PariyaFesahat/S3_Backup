@@ -10,18 +10,26 @@ targets:
     access_key_id: "minioadmin"
     secret_access_key: "minioadmin123"
     prefix: "postgres/"
-
+  - name: "secondary-minio"
+    enabled: true
+    bucket: "my-postgres-backups"
+    region: "us-east-1"
+    endpoint_url: "http://localhost:9000"
+    access_key_id: "minioadmin"
+    secret_access_key: "minioadmin123"
+    prefix: "postgres/"
 mappings:
   - path: "/opt/test"
     target_name: "primary-minio"
     enabled: true
 
   - path: "/opt/test2"
-    target_name: "primary-minio"
+    target_name: "secondary-minio"
     enabled: true
 
 retention:
   days: 10
+  cleanup_interval_hours: 24
 
 logging:
   level: INFO

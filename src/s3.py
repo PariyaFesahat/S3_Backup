@@ -218,3 +218,100 @@ class S3Client:
             Bucket=self.bucket,
             Key=object_key,
         )
+
+    def get_server_prefix(self) -> str:
+        """
+        Prefix under which all of this server's objects live for this
+        target, e.g. "<prefix>/<server_name>/". Used to scope retention
+        cleanup so it never touches another server's objects.
+        """
+
+        parts = []
+
+        if self.prefix:
+            parts.append(
+                self.prefix.strip("/")
+            )
+
+        parts.append(
+            self.server_name.strip("/")
+        )
+
+        return "/".join(parts) + "/"
+
+    def list_date_prefixes(self) -> dict[str, list[str]]:
+        """
+        List every object under this target's server prefix, grouped by
+        the immediate next path segment (expected to be a
+        "YYYY-MM-DD" date folder). Handles pagination transparently.
+        """
+
+        server_prefix = self.get_server_prefix()
+
+        grouped: dict[str, list[str]] = {}
+
+        paginator = self.client.get_paginator(
+            "list_objects_v2"
+        )
+
+        for page in paginator.paginate(
+            Bucket=self.bucket,
+            Prefix=server_prefix,
+        ):
+
+            for obj in page.get(
+                "Contents",
+                [],
+            ):
+
+                key = obj["Key"]
+                remainder = key[len(server_prefix):]
+                segment = remainder.split("/", 1)[0]
+
+                if not segment:
+                    continue
+
+                grouped.setdefault(
+                    segment, []
+                ).append(key)
+
+        return grouped
+
+    def delete_objects_batch(
+        self,
+        object_keys: list[str],
+    ) -> int:
+        """
+        Delete the given object keys using DeleteObjects, in batches of
+        up to 1000 (the API limit). Returns the number of objects
+        successfully deleted.
+        """
+
+        deleted = 0
+
+        for start in range(0, len(object_keys), 1000):
+            batch = object_keys[start:start + 1000]
+
+            response = self.client.delete_objects(
+                Bucket=self.bucket,
+                Delete={
+                    "Objects": [
+                        {"Key": key} for key in batch
+                    ],
+                    "Quiet": True,
+                },
+            )
+
+            errors = response.get("Errors", [])
+
+            if errors:
+                logger.error(
+                    "Failed to delete %d object(s) (target: %s): %s",
+                    len(errors),
+                    self.target_name,
+                    errors,
+                )
+
+            deleted += len(batch) - len(errors)
+
+        return deleted

@@ -87,6 +87,7 @@ class RetentionConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     days: int = 10
+    cleanup_interval_hours: int = 24
 
 
 class LoggingConfig(BaseModel):
