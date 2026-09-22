@@ -45,7 +45,7 @@ def test_unknown_target_reference_raises():
         parse_config(raw)
 
 
-def test_duplicate_path_across_enabled_mappings_raises():
+def test_same_path_can_map_to_multiple_targets():
     raw = _base_raw(
         targets=[
             {
@@ -67,11 +67,127 @@ def test_duplicate_path_across_enabled_mappings_raises():
         ],
     )
 
-    with pytest.raises(ConfigError, match="multiple targets"):
+    config = parse_config(raw)
+
+    assert [m.target_name for m in config.mappings] == [
+        "primary",
+        "secondary",
+    ]
+
+
+def test_target_names_list_maps_one_path_to_many_targets():
+    raw = _base_raw(
+        targets=[
+            {
+                "name": "primary",
+                "bucket": "bucket-a",
+                "access_key_id": "k",
+                "secret_access_key": "s",
+            },
+            {
+                "name": "secondary",
+                "bucket": "bucket-b",
+                "access_key_id": "k",
+                "secret_access_key": "s",
+            },
+        ],
+        mappings=[
+            {
+                "path": "/data/a",
+                "target_names": ["primary", "secondary"],
+            }
+        ],
+    )
+
+    config = parse_config(raw)
+
+    assert config.mappings[0].resolved_target_names == [
+        "primary",
+        "secondary",
+    ]
+
+
+def test_same_path_to_same_target_twice_raises():
+    raw = _base_raw(
+        mappings=[
+            {"path": "/data/a", "target_name": "primary"},
+            {"path": "/data/a", "target_name": "primary"},
+        ],
+    )
+
+    with pytest.raises(ConfigError, match="more than once"):
         parse_config(raw)
 
 
-def test_duplicate_path_with_one_mapping_disabled_does_not_raise():
+def test_mapping_without_any_target_raises():
+    raw = _base_raw(mappings=[{"path": "/data/a"}])
+
+    with pytest.raises(ConfigError, match="must set either"):
+        parse_config(raw)
+
+
+def test_mapping_with_both_target_forms_raises():
+    raw = _base_raw(
+        mappings=[
+            {
+                "path": "/data/a",
+                "target_name": "primary",
+                "target_names": ["primary"],
+            }
+        ]
+    )
+
+    with pytest.raises(ConfigError, match="use one or the other"):
+        parse_config(raw)
+
+
+def test_unknown_target_in_target_names_raises():
+    raw = _base_raw(
+        mappings=[
+            {
+                "path": "/data/a",
+                "target_names": ["primary", "nope"],
+            }
+        ]
+    )
+
+    with pytest.raises(ConfigError, match="unknown target"):
+        parse_config(raw)
+
+
+def test_source_dirs_without_mappings_fans_out_to_all_targets():
+    raw = {
+        "server": {"name": "test-server"},
+        "backup": {"source_dirs": ["/db_dump", "/var/dumps"]},
+        "targets": [
+            {
+                "name": "parspack",
+                "bucket": "c606586",
+                "access_key_id": "k",
+                "secret_access_key": "s",
+            },
+            {
+                "name": "hetzner",
+                "bucket": "tkhsrv",
+                "access_key_id": "k",
+                "secret_access_key": "s",
+            },
+        ],
+    }
+
+    config = parse_config(raw)
+
+    assert [m.path for m in config.mappings] == [
+        "/db_dump",
+        "/var/dumps",
+    ]
+    assert all(
+        m.resolved_target_names == ["parspack", "hetzner"]
+        for m in config.mappings
+    )
+
+
+def test_disabled_mapping_for_same_path_still_parses():
     raw = _base_raw(
         targets=[
             {
