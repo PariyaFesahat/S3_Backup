@@ -22,6 +22,7 @@ class S3Client:
     ):
         self.target_name = target.name
         self.bucket = target.bucket
+        self.endpoint_url = target.endpoint_url
         self.prefix = (
             prefix_override
             if prefix_override is not None
@@ -70,7 +71,7 @@ class S3Client:
         )
 
         logger.info(
-            "S3 client initialized for target: %s (bucket=%s)",
+            "S3 client initialized target=%s bucket=%s",
             self.target_name,
             self.bucket,
         )
@@ -169,11 +170,11 @@ class S3Client:
         file_path = file_path.resolve()
 
         logger.info(
-            "Uploading: %s -> s3://%s/%s (target: %s)",
+            "Uploading %s to target=%s (s3://%s/%s)",
             file_path,
+            self.target_name,
             self.bucket,
             object_key,
-            self.target_name,
         )
 
         try:
@@ -188,15 +189,16 @@ class S3Client:
         except Exception:
 
             logger.exception(
-                "Upload failed: %s (target: %s)",
-                file_path,
+                "Upload failed target=%s file=%s",
                 self.target_name,
+                file_path,
             )
 
             raise
 
         logger.info(
-            "Upload completed: %s",
+            "Upload successful target=%s file=%s",
+            self.target_name,
             file_path,
         )
 
@@ -208,10 +210,10 @@ class S3Client:
     ) -> None:
 
         logger.info(
-            "Deleting S3 object: s3://%s/%s (target: %s)",
+            "Deleting object target=%s (s3://%s/%s)",
+            self.target_name,
             self.bucket,
             object_key,
-            self.target_name,
         )
 
         self.client.delete_object(
@@ -306,7 +308,7 @@ class S3Client:
 
             if errors:
                 logger.error(
-                    "Failed to delete %d object(s) (target: %s): %s",
+                    "Failed to delete %d object(s) target=%s: %s",
                     len(errors),
                     self.target_name,
                     errors,

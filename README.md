@@ -83,10 +83,14 @@ targets:
     region: "eu-central-1"
     profile: "archive-role"                    # AWS named profile / IAM role instead of static keys
 
-# Each local path is explicitly routed to exactly one target above.
+# Each local path is explicitly routed to one or more targets above.
 mappings:
   - path: "/opt/test"
     target_name: "primary-minio"
+    enabled: true
+
+  - path: "/db_dump"                           # same path, several targets
+    target_names: ["primary-minio", "offsite-wasabi"]
     enabled: true
 
   - path: "/dump"
@@ -110,7 +114,7 @@ logging:
 
 | field | required | notes |
 |---|---|---|
-| `name` | yes | unique identifier, referenced by `mappings[].target_name` |
+| `name` | yes | unique identifier, referenced by `mappings[].target_name` / `mappings[].target_names` |
 | `bucket` | yes | destination bucket |
 | `region` | no | default `us-east-1` |
 | `endpoint_url` | no | for MinIO/Wasabi/other S3-compatible services |
@@ -125,27 +129,71 @@ Values may reference environment variables with `${VAR_NAME}` syntax (e.g. for s
 
 ## Path -> Target Mappings
 
-`mappings` is a list that explicitly assigns each local backup path to exactly one S3 target — paths are **not** fanned out to every target.
+`mappings` is a list that assigns each local backup path to **one or more** S3 targets. A path mapped to several targets is uploaded to each of them independently:
+
+```text
+Source path
+    ├── target: parspack
+    ├── target: hetzner
+    └── target: another-s3
+```
 
 | field | required | notes |
 |---|---|---|
-| `path` | yes | local directory to watch/back up; must be unique across mappings |
-| `target_name` | yes | must match a `targets[].name` |
+| `path` | yes | local directory to watch/back up; may appear in several mappings, once per target |
+| `target_name` | one of the two | a single target; must match a `targets[].name` |
+| `target_names` | one of the two | a list of targets for this path; each must match a `targets[].name` |
 | `destination_prefix` | no | if set, replaces (does not append to) the target's own `prefix` for this path |
-| `enabled` | no | default `true`; disables just this path -> target link |
+| `enabled` | no | default `true`; disables this whole mapping entry |
+
+Fanning one path out to several targets can be written either way — as one entry with `target_names`, or as one entry per target with `target_name`:
+
+```yaml
+mappings:
+  - path: "/db_dump"
+    target_names: ["parspack", "hetzner"]
+
+# ...is equivalent to:
+mappings:
+  - path: "/db_dump"
+    target_name: "parspack"
+  - path: "/db_dump"
+    target_name: "hetzner"
+```
 
 Config loading fails fast with a clear error if:
 
-- a mapping references a `target_name` that doesn't exist in `targets`
-- the same path is assigned to more than one enabled mapping
+- a mapping references a target that doesn't exist in `targets`
+- a mapping sets neither `target_name` nor `target_names`, or sets both
+- the same path is mapped to the *same* target more than once (that would upload the same content to the same place twice)
 - an `access_key_id`/`secret_access_key` pair is only half-set, or combined with `profile`
-- no mappings remain active after applying `enabled` flags on both mappings and targets
+- no path -> target links remain active after applying `enabled` flags on both mappings and targets
 
 A mapping pointed at a *disabled* target is not a config error — it's simply skipped at runtime and reported in the summary, so toggling a target off pauses everything routed to it without editing `mappings`.
+
+Per target, failures are isolated: if one target is unreachable or an upload to it fails, the other targets for that path still complete, and nothing already uploaded is rolled back. Retention is applied separately per target, and each source path is watched by exactly one filesystem watcher no matter how many targets it feeds.
 
 ### Legacy single-bucket format
 
 If `config.yaml` still uses the old format (`backup.source_dirs` + a single `s3:` block, no `targets`/`mappings`), it's auto-migrated at load time: one target is generated from the `s3:` block, and one mapping per `source_dirs` entry is generated pointing at it. A deprecation warning is logged. Update the file to the new format above when convenient — the migration shim may be removed in a future version.
+
+### Fan-out shorthand (`source_dirs` + `targets`, no `mappings`)
+
+If `backup.source_dirs` is given alongside `targets` but `mappings` is omitted, every source dir is mapped to **every** target:
+
+```yaml
+backup:
+  source_dirs:
+    - /db_dump
+
+targets:
+  - name: parspack
+    ...
+  - name: hetzner
+    ...
+```
+
+is expanded to one mapping per source dir with `target_names: [parspack, hetzner]`. Use explicit `mappings` when different paths need different targets.
 
 ## Server Name
 
@@ -182,7 +230,7 @@ mappings:
     target_name: "primary-minio"
 ```
 
-Every path in `mappings` is watched recursively and synchronized only to its assigned target.
+Every path in `mappings` is watched recursively (once per path, even when it feeds several targets) and synchronized to each target assigned to it.
 
 All file extensions are supported.
 
@@ -590,7 +638,7 @@ targets:
 
 `access_key_id` and `secret_access_key` must both be set, or both omitted (to fall back to a `profile` or the default AWS credential chain). Setting only one raises a config error at startup naming the offending target.
 
-### Unknown target / duplicate path error
+### Unknown target / duplicate path -> target error
 
 ```text
 Mapping for path '/opt/test' references unknown target 'primary-mino'. Known targets: primary-minio, offsite-wasabi
@@ -599,10 +647,10 @@ Mapping for path '/opt/test' references unknown target 'primary-mino'. Known tar
 Check for typos in `mappings[].target_name`, and confirm the target is spelled identically in `targets[].name`.
 
 ```text
-Path '/opt/test' is mapped to multiple targets ('primary-minio', 'offsite-wasabi'); each path must map to exactly one target
+Path '/opt/test' is mapped to target 'primary-minio' more than once; a path may map to many targets, but only once to each
 ```
 
-Each `path` may appear in at most one *enabled* mapping. Disable or remove the extra mapping.
+A `path` may map to as many targets as you like, but only once to each. Remove the redundant entry (or point it at a different target).
 
 ### MinIO connection error
 
