@@ -68,19 +68,91 @@ class S3TargetConfig(BaseModel):
 
 
 class MappingConfig(BaseModel):
+    """
+    One local source path and the S3 target(s) it is backed up to.
+
+    A path may fan out to any number of targets, either by listing them
+    in 'target_names', or by repeating the same path in several mapping
+    entries with different 'target_name' values. The only thing that is
+    rejected is mapping the same path to the *same* target twice.
+    """
+
     model_config = ConfigDict(extra="forbid")
 
     path: str
-    target_name: str
+    target_name: Optional[str] = None
+    target_names: Optional[list[str]] = None
     destination_prefix: Optional[str] = None
     enabled: bool = True
 
     @field_validator("path", "target_name")
     @classmethod
-    def _not_blank(cls, value: str, info) -> str:
-        if not value or not value.strip():
+    def _not_blank(cls, value: Optional[str], info) -> Optional[str]:
+        if value is None:
+            return value
+
+        if not value.strip():
             raise ValueError(f"'{info.field_name}' must not be empty")
+
         return value
+
+    @field_validator("target_names")
+    @classmethod
+    def _names_not_blank(
+        cls, values: Optional[list[str]]
+    ) -> Optional[list[str]]:
+
+        if values is None:
+            return values
+
+        if not values:
+            raise ValueError(
+                "'target_names' must list at least one target"
+            )
+
+        seen = set()
+
+        for value in values:
+
+            if not value or not value.strip():
+                raise ValueError(
+                    "'target_names' must not contain empty entries"
+                )
+
+            if value in seen:
+                raise ValueError(
+                    f"'target_names' lists target '{value}' twice"
+                )
+
+            seen.add(value)
+
+        return values
+
+    @model_validator(mode="after")
+    def _require_exactly_one_form(self) -> "MappingConfig":
+        if self.target_name is None and self.target_names is None:
+            raise ValueError(
+                f"Mapping for path '{self.path}' must set either "
+                "'target_name' (one target) or 'target_names' "
+                "(one or more targets)"
+            )
+
+        if self.target_name is not None and self.target_names is not None:
+            raise ValueError(
+                f"Mapping for path '{self.path}' sets both "
+                "'target_name' and 'target_names'; use one or the other"
+            )
+
+        return self
+
+    @property
+    def resolved_target_names(self) -> list[str]:
+        """Every target this mapping backs up to, in config order."""
+
+        if self.target_names is not None:
+            return list(self.target_names)
+
+        return [self.target_name]
 
 
 class RetentionConfig(BaseModel):
@@ -152,41 +224,48 @@ class AppConfig(BaseModel):
         target_names = {target.name for target in self.targets}
         targets_by_name = {target.name: target for target in self.targets}
 
-        seen_paths: dict[str, str] = {}
+        # (resolved path, target name) pairs. A path may appear as many
+        # times as there are targets; only the exact same pair twice is
+        # an error, because that would back the same content up to the
+        # same place twice.
+        seen_pairs: set[tuple[str, str]] = set()
+
+        active_pairs: list[tuple[str, str]] = []
 
         for mapping in self.mappings:
 
-            if mapping.target_name not in target_names:
-                known = ", ".join(sorted(target_names))
-                raise ValueError(
-                    f"Mapping for path '{mapping.path}' references "
-                    f"unknown target '{mapping.target_name}'. "
-                    f"Known targets: {known}"
-                )
+            for name in mapping.resolved_target_names:
+
+                if name not in target_names:
+                    known = ", ".join(sorted(target_names))
+                    raise ValueError(
+                        f"Mapping for path '{mapping.path}' references "
+                        f"unknown target '{name}'. "
+                        f"Known targets: {known}"
+                    )
 
             if not mapping.enabled:
                 continue
 
             resolved = str(Path(mapping.path).expanduser())
 
-            if resolved in seen_paths:
-                raise ValueError(
-                    f"Path '{mapping.path}' is mapped to multiple "
-                    f"targets ('{seen_paths[resolved]}', "
-                    f"'{mapping.target_name}'); each path must map "
-                    "to exactly one target"
-                )
+            for name in mapping.resolved_target_names:
 
-            seen_paths[resolved] = mapping.target_name
+                pair = (resolved, name)
 
-        active = [
-            mapping
-            for mapping in self.mappings
-            if mapping.enabled
-            and targets_by_name[mapping.target_name].enabled
-        ]
+                if pair in seen_pairs:
+                    raise ValueError(
+                        f"Path '{mapping.path}' is mapped to target "
+                        f"'{name}' more than once; a path may map to "
+                        "many targets, but only once to each"
+                    )
 
-        if not active:
+                seen_pairs.add(pair)
+
+                if targets_by_name[name].enabled:
+                    active_pairs.append(pair)
+
+        if not active_pairs:
             raise ValueError(
                 "No active path -> target mappings; nothing to back up "
                 "(check 'enabled' flags on targets and mappings)"
@@ -276,11 +355,59 @@ def _migrate_legacy_format(raw: dict) -> dict:
     return migrated
 
 
+def _is_fan_out_shorthand(raw: dict) -> bool:
+    """
+    'backup.source_dirs:' + 'targets:' with no explicit 'mappings:'
+    means "back every source dir up to every target".
+    """
+
+    return (
+        "targets" in raw
+        and "mappings" not in raw
+        and bool((raw.get("backup", {}) or {}).get("source_dirs"))
+    )
+
+
+def _expand_fan_out_shorthand(raw: dict) -> dict:
+    source_dirs = (raw.get("backup", {}) or {}).get("source_dirs", [])
+
+    all_target_names = [
+        (target or {}).get("name")
+        for target in (raw.get("targets") or [])
+    ]
+
+    target_names = [name for name in all_target_names if name]
+
+    logger.info(
+        "No 'mappings:' given; backing up %d source dir(s) to all "
+        "%d target(s): %s",
+        len(source_dirs),
+        len(target_names),
+        ", ".join(target_names),
+    )
+
+    expanded = dict(raw)
+    expanded.pop("backup", None)
+    expanded["mappings"] = [
+        {
+            "path": path,
+            "target_names": list(target_names),
+            "enabled": True,
+        }
+        for path in source_dirs
+    ]
+
+    return expanded
+
+
 def parse_config(raw: dict) -> AppConfig:
     raw = raw or {}
 
     if _is_legacy_format(raw):
         raw = _migrate_legacy_format(raw)
+
+    elif _is_fan_out_shorthand(raw):
+        raw = _expand_fan_out_shorthand(raw)
 
     raw = _interpolate_env_vars(raw)
 
