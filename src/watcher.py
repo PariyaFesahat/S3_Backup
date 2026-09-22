@@ -5,6 +5,8 @@ from pathlib import Path
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
+from .manager import MultiTargetBackupManager
+
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +112,8 @@ class BackupEventHandler(FileSystemEventHandler):
                 backup_dir,
             )
 
+            # One filesystem event drives every target mapped to this
+            # path; the manager isolates per-target failures.
             self.manager.sync_directory(
                 backup_dir
             )
@@ -196,17 +200,48 @@ class BackupWatcher:
         debounce_seconds: int = 5,
     ):
 
-        # Each mapping may route to a different S3 target, so each
-        # watched path gets its own BackupManager (bound to that
-        # mapping's S3Client) rather than sharing a single manager.
-        self.path_managers = [
-            (Path(path).resolve(), manager)
-            for path, manager in path_managers
-        ]
+        # A source path may fan out to several S3 targets, but it is
+        # watched exactly once: managers registered for the same
+        # resolved path are merged behind a single event handler, so
+        # one filesystem event triggers every target.
+        self.path_managers = self._deduplicate(path_managers)
 
         self.debounce_seconds = (
             debounce_seconds
         )
+
+    @staticmethod
+    def _deduplicate(
+        path_managers: list[tuple[str, object]],
+    ) -> list[tuple[Path, object]]:
+
+        grouped: dict[Path, list[object]] = {}
+
+        for path, manager in path_managers:
+
+            source_dir = Path(path).expanduser().resolve()
+
+            grouped.setdefault(source_dir, []).append(manager)
+
+        merged: list[tuple[Path, object]] = []
+
+        for source_dir, managers in grouped.items():
+
+            if len(managers) == 1:
+                merged.append((source_dir, managers[0]))
+                continue
+
+            logger.debug(
+                "Merging %d managers into a single watcher for %s",
+                len(managers),
+                source_dir,
+            )
+
+            merged.append(
+                (source_dir, MultiTargetBackupManager(managers))
+            )
+
+        return merged
 
     def start(self) -> None:
 
@@ -254,9 +289,16 @@ class BackupWatcher:
                 observer
             )
 
+            target_names = getattr(
+                manager, "target_names", None
+            )
+
             logger.info(
-                "Watching: %s",
+                "Watching: %s (targets: %s)",
                 source_dir,
+                ", ".join(target_names)
+                if target_names
+                else getattr(manager, "target_name", "unknown"),
             )
 
         if not observers:
